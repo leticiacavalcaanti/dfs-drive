@@ -31,6 +31,22 @@ docker compose run --rm client status   # nós vivos, uso de disco, arquivos por
 No Git Bash (Windows) use `export MSYS_NO_PATHCONV=1` antes, para os caminhos `/files/...` não serem convertidos.
 Os arquivos locais do cliente ficam na pasta `dfs/files/` (montada como `/files` no contêiner).
 
+## Interface web (Next.js)
+
+Além do CLI, há um painel web (bônus do enunciado): **http://localhost:3001**
+
+- Resumo: nós vivos, suspeitos e caídos; arquivos por estado (íntegro, sub-replicado, em recuperação, perdido).
+- Nós: cartões com estado, uso de disco e botão de drain; as re-replicações em andamento aparecem em tempo real.
+- Arquivos: navegar por pastas, criar pasta, **enviar** (escolhendo N), **baixar**, remover e ver os detalhes (hash e em quais nós está cada bloco).
+
+O navegador só fala com o Next.js; as rotas de servidor (`frontend/app/api`) fazem o papel do cliente: dividem em blocos, calculam o SHA-256,
+enviam direto aos nós e, no download, verificam cada bloco e o hash final (réplica corrompida é reportada e substituída). Limitação: o
+conteúdo dos arquivos passa por essa camada (o CLI continua sendo o caminho direto cliente-nós) e a criptografia só existe no CLI.
+
+```bash
+docker compose up -d --build        # sobe também o frontend em http://localhost:3001
+```
+
 ## Comandos (todos com exemplo)
 
 ```bash
@@ -97,7 +113,8 @@ Relatório de testes: [docs/relatorio-testes.md](docs/relatorio-testes.md). Dado
 ## Estrutura
 
 ```
-dfs/controller.py  node.py  client.py  common.py     código
+dfs/controller.py  node.py  client.py  common.py     código (back-end Python)
+frontend/                                             painel web em Next.js
 docker-compose.yml                                    1 controlador + 5 nós (+ nó 6 opcional) + cliente
 tests/                                                functional.py, perf.py, recovery.py, plots.py, results/
 docs/                                                 relatorio-tecnico.md, relatorio-testes.md
