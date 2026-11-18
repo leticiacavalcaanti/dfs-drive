@@ -103,6 +103,14 @@ services:
     volumes: ["./files:/files", "./tests:/tests"]
     depends_on: [controller]
 
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      CONTROLLER_URL: http://controller:9000
+    ports: ["3001:3000"]            # 3001 para não colidir com o Home Broker da Bolsa (3000)
+    depends_on: [controller]
+
 volumes:
   controller-data:
   node1-data:
