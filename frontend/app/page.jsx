@@ -1,83 +1,164 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import { dfs } from "../lib/api";
-import { TONE } from "../lib/format";
-import NodesPanel from "../components/NodesPanel";
-import FilesPanel from "../components/FilesPanel";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { dfs } from "../lib/dfs";
+import { decimal, relogio, tamanho } from "../lib/formato";
+import Cluster from "../ui/Cluster";
+import Explorador from "../ui/Explorador";
+import Detalhes from "../ui/Detalhes";
+import Glifo from "../ui/Glifo";
 
-const STATES = ["íntegro", "sub-replicado", "em recuperação", "perdido"];
+let proximoEvento = 1;
 
-export default function Home() {
+function Diario({ eventos, limpar }) {
+  const [aberto, setAberto] = useState(false);
+  const ultimo = eventos[0];
+  return (
+    <footer className="barra">
+      <p className="barra__ultimo" role="status" aria-live="polite">
+        {ultimo
+          ? <><span className="estado__ponto" data-tom={ultimo.tom} aria-hidden="true" /><time>{relogio(ultimo.quando)}</time><span>{ultimo.texto}</span></>
+          : <span className="mudo">Nenhuma operação nesta sessão ainda.</span>}
+      </p>
+      <button type="button" className="btn btn--secondary" aria-expanded={aberto} aria-controls="diario"
+        onClick={() => setAberto((a) => !a)} disabled={!eventos.length}>
+        <Glifo nome="diario" />Diário ({eventos.length})
+      </button>
+      {aberto && eventos.length > 0 && (
+        <div className="diario" id="diario">
+          <div className="diario__topo">
+            <h2>Diário da sessão</h2>
+            <button type="button" className="link" onClick={() => { limpar(); setAberto(false); }}>Limpar diário</button>
+          </div>
+          <ol>
+            {eventos.map((e) => (
+              <li key={e.id}>
+                <span className="estado__ponto" data-tom={e.tom} aria-hidden="true" />
+                <time>{relogio(e.quando)}</time>
+                <span>{e.texto}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </footer>
+  );
+}
+
+export default function Painel() {
   const [status, setStatus] = useState(null);
+  const [metricas, setMetricas] = useState(null);
   const [offline, setOffline] = useState(false);
-  const [notice, setNotice] = useState(null); // { kind: "ok" | "err", text }
+  const [lidoEm, setLidoEm] = useState(null);
+  const [dir, setDir] = useState("/");
+  const [alvo, setAlvo] = useState(null);
+  const [itens, setItens] = useState(null);
+  const [eventos, setEventos] = useState([]);
+  const [versao, setVersao] = useState(0);
+  const tentativas = useRef(0);
 
-  const load = useCallback(async () => {
-    try { setStatus(await dfs.status()); setOffline(false); } catch { setOffline(true); }
+  const anotar = useCallback((tipo, texto) => {
+    const tom = { ok: "ok", aviso: "warn", erro: "bad" }[tipo] ?? "info";
+    setEventos((l) => [{ id: proximoEvento++, tom, texto, quando: Date.now() }, ...l].slice(0, 60));
+  }, []);
+
+  const lerStatus = useCallback(async () => {
+    try {
+      setStatus(await dfs.status());
+      setOffline(false);
+      setLidoEm(Date.now());
+      tentativas.current = 0;
+    } catch {
+      tentativas.current += 1;
+      setOffline(true);
+    }
+  }, []);
+
+  const lerMetricas = useCallback(async () => {
+    try { setMetricas(await dfs.metricas()); } catch { /* o status já mostra a queda */ }
   }, []);
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 2000);
-    return () => clearInterval(t);
-  }, [load]);
+    lerStatus();
+    lerMetricas();
+    const a = setInterval(lerStatus, 2000);
+    const b = setInterval(lerMetricas, 5000);
+    return () => { clearInterval(a); clearInterval(b); };
+  }, [lerStatus, lerMetricas]);
 
-  const say = useCallback((kind) => (text) => setNotice({ kind, text }), []);
-  const onNotice = useCallback(say("ok"), [say]);
-  const onError = useCallback(say("err"), [say]);
+  const irPara = useCallback((d) => { setDir(d); setAlvo(null); }, []);
+  const aoMudar = useCallback(() => { lerStatus(); lerMetricas(); }, [lerStatus, lerMetricas]);
 
-  const nodes = status?.nodes ?? [];
-  const count = (s) => nodes.filter((n) => n.status === s).length;
-  const moving = status?.rereplications_in_progress ?? [];
+  const baixar = useCallback(async (path) => {
+    try {
+      const { notas, bytes } = await dfs.baixar(path);
+      anotar(notas.length ? "aviso" : "ok", `${path} baixado (${tamanho(bytes)}), hash de cada bloco e do arquivo conferido`
+        + (notas.length ? `. ${notas.join("; ")}` : ""));
+    } catch (e) {
+      anotar("erro", `${path} não foi baixado: ${e.message}`);
+    }
+  }, [anotar]);
+
+  const removerArquivo = useCallback(async (path) => {
+    try {
+      await dfs.removerArquivo(path);
+      anotar("ok", `${path} removido`);
+      setAlvo(null);
+      setVersao((v) => v + 1);
+      aoMudar();
+    } catch (e) {
+      anotar("erro", `${path} não foi removido: ${e.message}`);
+    }
+  }, [anotar, aoMudar]);
+
+  const alternarDreno = useCallback(async (no) => {
+    try {
+      if (no.draining) { await dfs.retomar(no.id); anotar("ok", `${no.id} voltou a receber réplicas`); }
+      else { await dfs.drenar(no.id); anotar("aviso", `${no.id} em drenagem: os blocos dele serão copiados para outros nós`); }
+      await lerStatus();
+    } catch (e) {
+      anotar("erro", `não foi possível mudar a drenagem de ${no.id}: ${e.message}`);
+    }
+  }, [anotar, lerStatus]);
+
+  const nos = status?.nodes ?? [];
+  const cfg = metricas?.config;
 
   return (
-    <main>
-      <header className="top">
-        <div>
-          <p className="eyebrow">Sistemas Distribuídos · UFS</p>
-          <h1>DFS Console</h1>
+    <div className="casca">
+      <header className="topo">
+        <a className="pular" href="#t-arquivos">Pular para os arquivos</a>
+        <div className="marca">
+          <span className="marca__arco" aria-hidden="true" />
+          <h1>DFS</h1>
+          <p className="marca__sub">sistema de arquivos distribuído</p>
         </div>
-        <div className={`conn ${offline ? "bad" : "ok"}`} role="status">
-          {offline ? "controlador indisponível: tentando de novo…" : "conectado ao controlador"}
-        </div>
+        <p className="conexao" data-tom={offline ? "bad" : status ? "ok" : "info"} role="status">
+          <span className="estado__ponto" aria-hidden="true" />
+          {offline
+            ? `Sem resposta do controlador, tentando de novo (${tentativas.current})`
+            : status ? <>Controlador respondendo <span className="mudo">· lido às {relogio(lidoEm)}</span></> : "Conectando ao controlador…"}
+        </p>
+        {cfg && (
+          <dl className="config" aria-label="Configuração do controlador">
+            <div title="nível de replicação padrão"><dt>N</dt><dd>{cfg.N}</dd></div>
+            <div title="réplicas confirmadas antes de responder"><dt>W</dt><dd>{cfg.W}</dd></div>
+            <div title="disco acima disso não recebe réplicas novas"><dt>limite</dt><dd>{decimal(cfg.disk_limit * 100)} %</dd></div>
+            <div title="nó vira suspeito / caído após esse tempo sem sinal"><dt>sinal</dt><dd>{decimal(cfg.heartbeat_suspect_s)}/{decimal(cfg.heartbeat_dead_s)} s</dd></div>
+          </dl>
+        )}
       </header>
 
-      {notice && (
-        <div className={`notice ${notice.kind}`} role="alert">
-          <span>{notice.text}</span>
-          <button className="ghost" onClick={() => setNotice(null)}>Fechar</button>
-        </div>
-      )}
-
-      <section aria-label="Resumo" className="summary">
-        <div className="tile"><b className="ok-text">{count("alive")}</b><span>nós vivos</span></div>
-        <div className="tile"><b className="warn-text">{count("suspect")}</b><span>suspeitos</span></div>
-        <div className="tile"><b className="bad-text">{count("dead")}</b><span>caídos</span></div>
-        {STATES.map((s) => (
-          <div className="tile" key={s}><b>{status?.files_by_state?.[s] ?? 0}</b><span className={`pill ${TONE[s]}`}>{s}</span></div>
-        ))}
-      </section>
-
-      {moving.length > 0 && (
-        <section className="moving" aria-label="Re-replicações em andamento">
-          <h2>Recuperação em andamento</h2>
-          <ul>
-            {moving.map((m) => (
-              <li key={m.chunk}><code>{m.chunk}</code> copiando de <strong>{m.source}</strong> para <strong>{m.target}</strong> (restavam {m.live_replicas} cópia(s) viva(s))</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      <section aria-labelledby="h-nodes">
-        <h2 id="h-nodes">Nós de armazenamento</h2>
-        <NodesPanel nodes={nodes} onChanged={load} onError={onError} />
-      </section>
-
-      <section aria-labelledby="h-files">
-        <h2 id="h-files">Arquivos</h2>
-        <FilesPanel onNotice={onNotice} onError={onError} />
-      </section>
-    </main>
+      <div className="mesa" data-entra>
+        <Cluster status={status} metricas={metricas} aoAlternarDreno={alternarDreno} />
+        <main className="folha">
+          <Explorador dir={dir} irPara={irPara} selecionado={alvo} selecionar={setAlvo}
+            padraoN={cfg?.N} maxN={nos.length} anotar={anotar} aoMudar={aoMudar} aoListar={setItens}
+            baixar={baixar} versao={versao} />
+          <Detalhes alvo={alvo} dir={dir} itens={itens} nos={nos} fechar={() => setAlvo(null)}
+            baixar={baixar} remover={removerArquivo} />
+          <Diario eventos={eventos} limpar={() => setEventos([])} />
+        </main>
+      </div>
+    </div>
   );
 }
